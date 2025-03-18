@@ -1,0 +1,361 @@
+---
+title: "JSC370 Midterm"
+author: "Eric Liang"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: 
+    toc: true
+    number_sections: true
+    highlight: tango
+    keep_tex: true
+    toc_depth: 3
+  html_document: 
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: united
+    highlight: tango
+  github_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    highlight: tango
+    keep_md: true
+    toc_depth: 3
+    always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+AQS_EMAIL <- "er.liang@mail.utoronto.ca"
+AQS_KEY <- "greygoose86"
+STATE <- "06" # California
+```
+
+```{r libraries, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(httr)
+library(jsonlite)
+library(data.table)
+library(lubridate)
+```
+
+# Introduction
+In this project, we investigate air quality trends in California in 2024. We use the [AQS AirData API](https://aqs.epa.gov/aqsweb/documents/data_api.html) to collect air quality data for California. The AQS database is maintained by the United States Environmental Protection Agency (EPA) and contains air quality data from thousands of monitoring stations across the United States. The EPA have been storing data for over 50 years, and contains more than 3 billion records now^[https://aqs.epa.gov/aqsweb/documents/about_aqs_data.html].
+
+Our primary research objective is to investigate seasonal and spatial trends in air quality in California. We will investigate the following questions:
+
+- How do air quality levels vary by season?
+- Are there differences in air quality levels between counties?
+- Can we construct a model to predict air quality levels based on other variables?
+
+# Methods
+We acquire data using the following steps:
+
+1. Sign up for an API key using email.
+2. Get a list of parameter classes. We choose the parameter class from this list: in this case `CRITERIA`, which includes common air pollutants.
+3. Get a list of parameters for the `CRITERIA` class.
+4. Get the data for the parameters in the `CRITERIA` class for California in 2024. Due to limits on the API, we can only access one month at a time. The total size of the data is ~2.5 GB, so we save the data to disk as we collect it.
+5. Convert to NDJSON format for easier reading.
+6. Read the data into R and combine into a single data table.
+   
+
+```{r get parameter classes, eval=FALSE, include=FALSE}
+url <- "https://aqs.epa.gov/data/api/list/classes"
+response <- httr::GET(
+    url,
+    query = list(
+        email = AQS_EMAIL,
+        key = AQS_KEY
+    )
+)
+
+httr::content(response, as = "parsed")
+```
+
+```{r get parameters, include=FALSE}
+url <- "https://aqs.epa.gov/data/api/list/parametersByClass"
+response <- httr::GET(
+    url,
+    query = list(
+        email = AQS_EMAIL,
+        key = AQS_KEY,
+        pc = "CRITERIA"
+    )
+)
+
+params <- map_dfr(httr::content(response, as = "parsed")$Data, as_tibble)
+params
+```
+
+```{r get data, include=FALSE}
+url <- "https://aqs.epa.gov/data/api/sampleData/byState"
+year <- 2024
+
+for (month in 1:12) {
+    start_date <- as.Date(sprintf("%d-%02d-01", year, month))  # First day of the month
+    end_date <- ceiling_date(start_date, "month") - days(1)  # Last day of the month
+
+    start_formatted <- format(start_date, "%Y%m%d")  # Convert to YYYYMMDD
+    end_formatted <- format(end_date, "%Y%m%d")
+
+    file_path <- paste("data/", year, month, ".json", sep = "")
+    print(file_path)
+    if (!file.exists(file_path)) {
+        response <- httr::GET(
+            url,
+            query = list(
+                email = AQS_EMAIL,
+                key = AQS_KEY,
+                param = paste(params$code[1:5], collapse = ","),
+                bdate = start_formatted,
+                edate = end_formatted,
+                state = STATE
+            ),
+            httr::write_disk(file_path, overwrite = TRUE)
+        )
+    }
+}
+```
+
+```{bash convert to ndjson, eval=FALSE, include=FALSE}
+for month in {1..12}; do
+    jq -c '.Data[]' "data/2024${month}.json" > "data/2024${month}.ndjson"
+done
+```
+
+```{r read data, include=FALSE}
+all_data <- list()
+
+for (month in 1:12) {
+    file_path <- paste("data/", year, month, ".ndjson", sep = "")
+    con <- file(file_path, "r")
+    data <- stream_in(con, pagesize = 1000)
+    close(con)
+
+    if (!is.null(data)) {
+        dt <- as.data.table(data)
+        all_data[[length(all_data) + 1]] <- dt  # Append to list
+    }
+}
+
+dt <- rbindlist(all_data)
+```
+
+Afterwards, we can clean the data and perform some preliminary analysis. We will use primarily use summary statistics and plots to investigate the data. We will address missingness and other problems as they arise. We will finally select only columns of interest to our analysis.
+
+# Preliminary Results
+## Cleaning
+```{r dims, eval=FALSE, include=FALSE}
+dim(dt)
+```
+
+Our data consists of 2,868,296 observations and 29 variables. The variables include the following (with descriptions from the [AQS Data dictionary](https://aqs.epa.gov/aqsweb/documents/AQS_Data_Dictionary.html)):
+
+```{r variables, message=TRUE}
+desc <- data.frame(
+    variable = names(dt),
+    type = sapply(dt, class),
+    description = c(
+        "FIPS code for the state",
+        "FIPS code for the county",
+        "Unique identifier for the site",
+        "Unique identifier for the parameter",
+        "Parameter Occurrence Code, which is a unique identifier for the parameter occurrence",
+        "Latitude",
+        "Longitude",
+        "Geodetic datum",
+        "Parameter name",
+        "Local date when the measurement was taken",
+        "Local time when the measurement was taken",
+        "The UTC date when the measurement was taken",
+        "The UTC time when the measurement was taken",
+        "The measured value",
+        "The unit of measure for the parameter",
+        "Unique identifier for the unit of measure",
+        "The time duration over which the measurement was taken",
+        "Unique identifier for the time duration",
+        "The frequency of the measurement",
+        "The minimum concentration of the measurement in which the value is considered valid",
+        "Estimated uncertainty of the measurement",
+        "A flag indicating if the measurement has been adjusted, voided, or requires special consideration",
+        "The category of method used",
+        "The specific method used",
+        "Unique identifier for the method",
+        "The name of the state",
+        "The name of the county",
+        "The last date the record was updated in the AQS database",
+        "The Core Based Statistical Area (CBSA) code"
+    )
+)
+
+colnames(desc) <- c("Variable", "Type", "Description")
+
+knitr::kable(desc, format = "html", row.names = FALSE) %>%
+    kable_styling("striped", full_width = FALSE)
+```
+
+We can see the missingness in the following table:
+
+```{r summary stats, message=TRUE}
+summary_dt <- data.table(
+  variable = names(dt),
+  unique_values = sapply(dt, function(x) length(unique(na.omit(x)))),
+  missing_values = sapply(dt, function(x) sum(is.na(x)))
+)
+
+colnames(summary_dt) <- c("Variable", "Unique Values", "Missing Values")
+
+knitr::kable(summary_dt, format = "html") %>%
+    kable_styling("striped", full_width = FALSE)
+```
+
+As part of our data cleaning process, we need to clean missing or otherwise problematic data points. As sample measurement is our primary variable of interest, we will remove observations with missing values in this column. Additionally, we will remove observations with problematic qualifiers (as described in the [AQS Qualifiers list](https://aqs.epa.gov/aqsweb/documents/codetables/qualifiers.html)).
+
+```{r clean data, include=FALSE}
+dt_clean <- dt[!is.na(sample_measurement)]
+dt_clean <- dt_clean[is.na(qualifier) | qualifier %in% c("1C", "1V", "V")]
+```
+
+Amongst the variables, there exists a great number of redundancy, such as between codes and names. We will select only the columns of interest for our analysis. We will select the following columns:
+
+- `site_number`
+- `latitude`
+- `longitude`
+- `parameter`
+- `date_gmt`
+- `time_gmt`
+- `sample_measurement`
+- `units_of_measure`
+- `sample_duration`
+- `sample_frequency`
+- `detection_limit`
+- `method`
+- `state`
+- `county`
+
+Additionally, we will convert the date and time columns to a single datetime column.
+
+```{r select columns, include=FALSE}
+dt_clean <- dt_clean[, c("site_number", "latitude", "longitude", "parameter", "date_gmt", "time_gmt", "sample_measurement", "units_of_measure", "sample_duration", "sample_frequency", "detection_limit", "method", "state", "county")]
+dt_clean[, datetime_gmt := ymd_hm(paste(date_gmt, time_gmt), tz="GMT")]
+dt_clean[, c("date_gmt", "time_gmt") := NULL]
+
+dim(dt_clean)
+```
+
+We are left with 2,414,549 observations and 14 variables. Now we can compute summary statistics for the cleaned data.
+
+```{r summary stats cleaned, message=TRUE}
+summary_stats <- dt_clean[, lapply(.SD, function(x) {
+  if (is.numeric(x)) {
+    list(
+      mean = mean(x, na.rm = TRUE),
+      median = median(x, na.rm = TRUE),
+      sd = sd(x, na.rm = TRUE),
+      min = min(x, na.rm = TRUE),
+      max = max(x, na.rm = TRUE),
+      unique = length(unique(na.omit(x))),
+      na_count = sum(is.na(x))
+    )
+  } else {
+    NULL
+  }
+}), .SDcols = names(dt_clean)]
+
+summary_stats_df <- as.data.frame(t(summary_stats))
+colnames(summary_stats_df) <- c("Mean", "Median", "SD", "Min", "Max", "Unique Values", "NA Count")
+
+
+knitr::kable(summary_stats_df, format = "html") %>%
+    kable_styling("striped", full_width = FALSE)
+```
+
+We can note a few important observations:
+
+- The longitude and latitude values are consistent with California.
+- Some sample measurements are negative, which is not possible. This could possibly be caused by instrumental bias or other issues. As these observations are a small fraction of the data (n = 13), we will remove them.
+
+```{r remove negative measurements, include=FALSE}
+dt_clean <- dt_clean[sample_measurement >= 0]
+```
+
+Finally, we verify that units are consistent within each parameter.
+
+```{r check units, message=TRUE}
+units_check <- dt_clean[, .(unique_units = unique(units_of_measure)), by = parameter]
+
+colnames(units_check) <- c("Parameter", "Unique Units")
+
+knitr::kable(units_check, format = "html") %>%
+    kable_styling("striped", full_width = FALSE)
+```
+
+We can see that units are consistent within each parameter. As this is the case, we can rename the parameter name to include the unit, and drop the unit. We will also drop the detection limit, as it is not relevant to our analysis.
+
+```{r rename parameter, include=FALSE}
+dt_clean[, parameter := paste(parameter, "(", units_of_measure, ")")]
+dt_clean[, c("units_of_measure", "detection_limit") := NULL]
+```
+
+## Exploratory Plots
+First, we will plot the distribution of sample measurements for each parameter.
+```{r plot distributions, message=TRUE}
+p <- ggplot(dt_clean, aes(x = sample_measurement)) +
+    geom_histogram(bins = 40) +
+    facet_wrap(~parameter, scales = "free") +
+    labs(title = "Distribution of Sample Measurements by Parameter", x = "Sample Measurement", y = "Frequency")
+
+p
+```
+
+We can observe that the distributions of every parameter is highly right-skewed. This is expected, as air quality is generally good, and high values are rare.
+
+Next, we will plot sample measurements against date. Due to the scale differences, we will facet by parameter.
+
+```{r plot time series, message=TRUE}
+p <- ggplot(dt_clean, aes(x = datetime_gmt, y = sample_measurement)) +
+    geom_point() +
+    facet_wrap(~parameter, scales = "free_y") +
+    labs(title = "Sample Measurements by Parameter Over Time", x = "Date", y = "Sample Measurement")
+
+p
+```
+
+Aside from lead (which is relatively sparse in the data), we can observe clear seasonal trends in our data. Carbon monoxide and nitrogen dioxide have peaks during the winter months, while ozone has peaks during the summer months.
+
+We will also plot the distribution of sample measurements of ozone by county. We will only plot the top 10 counties by observation count.
+
+```{r plot ozone by county, message=TRUE}
+top_counties <- dt_clean[, .N, by = county][order(-N)][1:10]$county
+dt_ozone <- dt_clean[parameter == "Ozone ( Parts per million )" & county %in% top_counties]
+
+p <- ggplot(dt_ozone, aes(x = sample_measurement)) +
+    geom_histogram(bins = 40) +
+    facet_wrap(~county, scales = "free") +
+    labs(title = "Distribution of Ozone Sample Measurements by County", x = "Sample Measurement (ppm)", y = "Frequency")
+
+p
+```
+
+We can observe that there are differences in ozone levels between counties. This is expected, as ozone levels are influenced by local factors such as traffic and industry. Investigating the reasons for these differences would require further analysis.
+
+```{r spacial density heatmap, include=FALSE}
+# dt_monthly <- dt_clean[, .(mean_measurement = mean(sample_measurement, na.rm = TRUE)), by = .(parameter, month = month(datetime_gmt))]
+
+# p <- ggplot(dt_clean, aes(x = longitude, y = latitude, z = sample_measurement)) +
+#     stat_density2d(aes(fill = ..level..), geom = "polygon") +
+#     scale_fill_viridis_c(option = "magma", name = "Density") +
+#     coord_fixed() +
+#     labs(title = "Spatial Density of Ozone Measurements", x = "Longitude", y = "Latitude") +
+#     theme_minimal()
+
+# p
+```
+
+# Summary
+In summary, we have collected and wrangled air quality data for California in 2024, and performed some preliminary analysis. We have observed superficial trends in the data, suggesting that there may been seasonal and spatial differences in air quality. Further analysis will involve formalizing these questions into statistical tests and models to formally answer our questions from the introduction.

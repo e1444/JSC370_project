@@ -1,0 +1,5 @@
+# Inference on Air Quality Trends in California 2024
+
+In this project, we investigate air quality trends in California in 2024. We use the [AQS AirData API](https://aqs.epa.gov/aqsweb/documents/data_api.html) to collect air quality data for California. The AQS database is maintained by the United States Environmental Protection Agency (EPA) and contains air quality data from thousands of monitoring stations across the United States. The EPA have been storing data for over 50 years, and contains more than 3 billion records now^[https://aqs.epa.gov/aqsweb/documents/about_aqs_data.html].
+
+Our primary research objective is to investigate short-term spatio-temporal trends in air quality in California. For this goal, we collect ozone data, as well as meteorological data such as temperature, humidity, and wind speed. To analyze the trends, we leverage generalized additive models (GAMs) to model the data, due to their flexibility and interpretability.

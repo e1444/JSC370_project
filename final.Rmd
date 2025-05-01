@@ -7,7 +7,7 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 AQS_EMAIL <- "er.liang@mail.utoronto.ca"
 AQS_KEY <- "greygoose86"
 STATE <- "06" # California
@@ -981,7 +981,7 @@ ggplot(dt_gam, aes(x = pred, y = dt_gam$sample_measurement)) +
 
 One advantage of using GAMs is that we can visualize smooth terms independently, to understand the effect of each variable on the response.
 
-```{r gam1 plot, message=TRUE, fig.cap="Smooth terms for GAM 1. The plots show the effect of each variable on the response. The smooth terms are all significant, and show interesting trends in the data."}
+```{r gam1 plot, message=TRUE, fig.cap="Smooth terms for GAM 1. The plots show the effect of each variable on the response. Univariate terms include 95% prediction interval (not jointwise). The smooth terms are all significant, and show interesting trends in the data."}
 custom_labels <- c(
     "Longitude, latitude",
     "Hour (cyclic)",
@@ -1025,3 +1025,8 @@ There are several interesting observations we can make from the plots:
 - Ozone follows an opposite trend with relative humidity, being lowest at extreme humidities.
 - Ozone is lowest at low wind speeds, and highest at high wind speeds.
 
+# Conclusion
+
+In this project, we collect and fit a dataset of air quality measurements from California. Importantly, we find that it is possible to utilize relatively simple models to achieve good performance. We find that we can explain a large portion of the variance in the data using a relatively simple GAM, and by doing so, we are able to extra meaningful trends in the data.
+
+However, this project isn't without limitations. There are several important factors that we noted skipping in this analysis. Given more resources, we could like to include more data, such as more meteorological data, and more pollutants. In addition, we noted the presence of zero-inflation in the data, which we did not address. Fitting zero-inflated models would be a good next step, as they may improve the performance of our models, with no loss of interpretability. Finally, we note that the data is collected from a small number of sites. We could have instead collected data from the entirety of the USA, and possibly extracted more meaningful trends. However, this would have required a much larger dataset, and more resources to collect and clean the data.

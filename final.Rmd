@@ -310,7 +310,7 @@ desc <- data.frame(
 
 colnames(desc) <- c("Variable", "Type", "Description")
 
-knitr::kable(desc, format = "latex", row.names = FALSE, caption = "Table 1: AQS response column names, types, and descriptions.") %>%
+knitr::kable(desc, format = "latex", row.names = FALSE, caption = "AQS response column names, types, and descriptions.") %>%
     kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
     row_spec(0, bold = TRUE)
 ```
@@ -329,7 +329,7 @@ summary_dt <- data.table(
 
 colnames(summary_dt) <- c("Variable", "Unique Values", "Missing Values")
 
-knitr::kable(summary_dt, format = "latex", caption = "Table 2: Variable value count and missingness in pollutant data. Mostly clean, but some variables such as qualifier and sample measurement require attention.") %>%
+knitr::kable(summary_dt, format = "latex", caption = "Variable value count and missingness in pollutant data. Mostly clean, but some variables such as qualifier and sample measurement require attention.") %>%
     kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
     row_spec(0, bold = TRUE)
 ```
@@ -404,7 +404,7 @@ summary_stats_df <- as.data.frame(t(summary_stats))
 colnames(summary_stats_df) <- c("Mean", "Median", "SD", "Min", "Max", "Unique Values", "NA Count")
 rownames(summary_stats_df) <- c("Latitude", "Longitude", "Sample measurement", "Detection limit")
 
-knitr::kable(summary_stats_df, format = "latex", caption = "Table 3: Summary statistics of numeric columns in pollutant data. Negative values in sample measurement are unexpected, but the remaining information is consistent.") %>%
+knitr::kable(summary_stats_df, format = "latex", caption = "Summary statistics of numeric columns in pollutant data. Negative values in sample measurement are unexpected, but the remaining information is consistent.") %>%
     kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
     row_spec(0, bold = TRUE)
 ```
@@ -425,7 +425,7 @@ units_check <- dt_clean[, .(unique_units = unique(units_of_measure)), by = param
 
 colnames(units_check) <- c("Parameter", "Unique Units")
 
-knitr::kable(units_check, format = "latex", caption = "Table 4: Unique units for each pollutant. There is only one unit per pollutant.") %>%
+knitr::kable(units_check, format = "latex", caption = "Unique units for each pollutant. There is only one unit per pollutant.") %>%
     kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
     row_spec(0, bold = TRUE)
 ```
@@ -524,7 +524,7 @@ We similarly verify the consistency of units within each parameter.
 units_check <- dt_met_clean[, .(unique_units = unique(units_of_measure)), by = parameter]
 colnames(units_check) <- c("Parameter", "Unique Units")
 
-knitr::kable(units_check, format = "latex", caption = "Table 5: Unique units for meteorological data. There is only one unit per parameter.") %>%
+knitr::kable(units_check, format = "latex", caption = "Unique units for meteorological data. There is only one unit per parameter.") %>%
     kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
     row_spec(0, bold = TRUE)
 ```
@@ -653,10 +653,10 @@ We pick the distribution and link function based on what we observe in the data.
 ## Exploratory Plots
 First, we can plot the distribution of sample measurements for ozone.
 
-```{r plot distributions, message=TRUE}
+```{r plot distributions, message=TRUE, fig.cap="Distribution of ozone measurements. The distribution is right-skewed, with a large number of zero values."}
 p <- ggplot(dt_merged, aes(x = sample_measurement)) +
     geom_histogram(bins = 70) +
-    labs(title = "Distribution of Ozone measurements", x = "Sample Measurement", y = "Frequency", caption = "Figure 1: Distribution of ozone measurements. The distribution is right-skewed, with a large number of zero values.")
+    labs(title = "Distribution of Ozone measurements", x = "Sample Measurement", y = "Frequency")
 
 p
 ```
@@ -665,7 +665,7 @@ We can observe that the distributions of every parameter is right-skewed. This i
 
 As the data is non-negative and numerical, we may expect a gamma distribution to be a good fit. We also try fitting a normal and skew-normal distribution to the data.
 
-```{r distribution fit, message=TRUE}
+```{r distribution fit, message=TRUE, warning=FALSE, fig.cap="Distribution of ozone measurements. The distribution is right-skewed, with a large number of zero values. The fitted lines are a gamma distribution (red), a normal distribution (blue), and a skew-normal distribution (green). The normal distribution appears to be the best fit at a glance."}
 dt2 <- dt_merged[sample_measurement > 0]
 fit_gam <- fitdistr(dt2$sample_measurement, "gamma")
 
@@ -710,11 +710,11 @@ p <- ggplot(dt_merged, aes(x = sample_measurement)) +
 p
 ```
 
-We can observe from the distributions, the normal distribution is a better fit to the data. Since it also happens to be a common distribution, we choose to use it for our models.
+Since the normal distribution fits well and also happens to be a common distribution, we choose to use it for our models.
 
 Next, we plot the parameters over time.
 
-```{r plot time series ozone, message=TRUE}
+```{r plot time series ozone, message=TRUE, fig.cap="Sample measurements and meteorological data over time. The data is collected hourly, and shows seasonal trends. Ozone levels are higher in the summer months, and lower in the winter months. Temperature follows the same trend, while relative humidity appears to follow the opposite trend. Wind speed appears to be more random."}
 p1 <- ggplot(dt_merged, aes(x = datetime_gmt, y = sample_measurement)) +
     geom_point(alpha = 0.01) +
     labs(title = "Sample Measurements Over Time", x = "Date", y = "Sample Measurement")
@@ -733,7 +733,7 @@ p4 <- ggplot(dt_merged, aes(x = datetime_gmt, y = wind_speed)) +
 
 p <- p1 + p2 + p3 + p4 +
     plot_layout(ncol = 2) +
-    plot_annotation(title = "Sample Measurements and Meteorological Data Over Time", caption = "Figure 2: Sample measurements and meteorological data over time. The data is collected hourly, and shows seasonal trends. Ozone levels are higher in the summer months, and lower in the winter months. Temperature follows the same trend, while relative humidity appears to follow the opposite trend. Wind speed appears to be more random.")
+    plot_annotation(title = "Sample Measurements and Meteorological Data Over Time")
 
 p
 ```
@@ -742,14 +742,14 @@ This gives us a good overview of the data. We now have some evidence that these 
 
 We can note that although we have location data, since the data is collected from only a few sites (n = 45), it is not possible to effectively visualize the data on a map. Thus, we plot the distribution of sample measurements of ozone by county. We only plot the top 8 counties by observation count here (an interactive version containing all counties is available on the [project website](todo)).
 
-```{r plot ozone by county, message=TRUE}
+```{r plot ozone by county, message=TRUE, fig.cap="Distribution of ozone sample measurements by county. The distributions are similar, but there are some differences in the shape and spread of the distributions. This suggests that there may be differences in ozone levels between counties, which is expected due to local factors such as traffic and industry."}
 top_counties <- dt_merged[, .N, by = county][order(-N)][1:8]$county
 dt_top_counties <- dt_merged[county %in% top_counties]
 
 p <- ggplot(dt_top_counties, aes(x = sample_measurement)) +
     geom_histogram(bins = 25) +
     facet_wrap(~county, scales = "free") +
-    labs(title = "Distribution of Ozone Sample Measurements by County", x = "Sample Measurement (ppm)", y = "Frequency", caption = "Figure 3: Distribution of ozone sample measurements by county. The distributions are similar, but there are some differences in the shape and spread of the distributions. This suggests that there may be differences in ozone levels between counties, which is expected due to local factors such as traffic and industry.")
+    labs(title = "Distribution of Ozone Sample Measurements by County", x = "Sample Measurement (ppm)", y = "Frequency")
 
 p
 ```
@@ -811,7 +811,7 @@ tidy_gam1$Term <- c(
     "Wind speed"
 )
 
-kable(tidy_gam1, format = "latex", digits = 3, caption = "Table 6: Smooth term statistics for GAM 1. Using a sigificance level of 0.05, we find that all the smooth terms are significant.") %>%
+kable(tidy_gam1, format = "latex", digits = 3, caption = "Smooth term statistics for GAM 1. Using a sigificance level of 0.05, we find that all the smooth terms are significant.") %>%
     kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
     row_spec(0, bold = TRUE)
 ```
@@ -844,7 +844,7 @@ tidy_gam2$Term <- c(
     "Time",
     "Outdoor temperature, relative humidity, wind speed"
 )
-kable(tidy_gam2, format = "latex", digits = 3, caption = "Table 7: Smooth term statistics for GAM 2. Using a sigificance level of 0.05, we find that all the smooth terms are significant.") %>%
+kable(tidy_gam2, format = "latex", digits = 3, caption = "Smooth term statistics for GAM 2. Using a sigificance level of 0.05, we find that all the smooth terms are significant.") %>%
     kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
     row_spec(0, bold = TRUE)
 ```
@@ -877,7 +877,7 @@ tidy_gam3$Term <- c(
     "Outdoor temperature, relative humidity, wind speed"
 )
 
-kable(tidy_gam3, format = "latex", digits = 3, caption = "Table 8: Smooth term statistics for GAM 3. Using a sigificance level of 0.05, we find that all the smooth terms are significant.") %>%
+kable(tidy_gam3, format = "latex", digits = 3, caption = "Smooth term statistics for GAM 3. Using a sigificance level of 0.05, we find that all the smooth terms are significant.") %>%
     kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
     row_spec(0, bold = TRUE)
 ```
@@ -971,17 +971,17 @@ mean_rmse_gam3
 
 Computing the CV RMSE for each model, we find that the models achieve 0.0860, 0.0848, and 0.00783 respectively. This suggests that the models are performing similarly. However, the difference is not large enough to justify the complexity of introducing interaction terms. Thus, we choose model 1 as our final model. We can visualize how well our model fits the data using a scatter plot of the predicted values against the actual values.
 
-```{r gam1 pred plot, message=TRUE}
+```{r gam1 pred plot, message=TRUE, fig.cap="Predicted vs observed values for GAM 1. The model fits the data well, but there are some outliers. The model is not perfect, but it is a good approximation of the data."}
 pred <- predict(gam1, type = "response")
 ggplot(dt_gam, aes(x = pred, y = dt_gam$sample_measurement)) +
     geom_point(alpha = 0.4) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
-    labs(x = "Predicted", y = "Observed", title = "Predicted vs Observed", caption = "Figure 4: Predicted vs observed values for GAM 1. The model fits the data well, but there are some outliers. The model is not perfect, but it is a good approximation of the data.")
+    labs(x = "Predicted", y = "Observed", title = "Predicted vs Observed")
 ```
 
 One advantage of using GAMs is that we can visualize smooth terms independently, to understand the effect of each variable on the response.
 
-```{r gam1 plot, message=TRUE, fig.cap="Figure 5: Smooth terms for GAM 1. The plots show the effect of each variable on the response. The smooth terms are all significant, and show interesting trends in the data."}
+```{r gam1 plot, message=TRUE, fig.cap="Smooth terms for GAM 1. The plots show the effect of each variable on the response. The smooth terms are all significant, and show interesting trends in the data."}
 custom_labels <- c(
     "Longitude, latitude",
     "Hour (cyclic)",

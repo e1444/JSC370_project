@@ -1,0 +1,1027 @@
+---
+title: "JSC370 Final Project"
+author: "Eric Liang"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+AQS_EMAIL <- "er.liang@mail.utoronto.ca"
+AQS_KEY <- "greygoose86"
+STATE <- "06" # California
+year <- 2024
+```
+
+```{r libraries, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(httr)
+library(jsonlite)
+library(data.table)
+library(lubridate)
+library(MASS)
+library(sn)
+library(mgcv)
+library(patchwork)
+library(plotly)
+library(broom.mixed)
+library(caret)
+```
+
+# Introduction
+In this project, we investigate air quality trends in California in 2024. We use the [AQS AirData API](https://aqs.epa.gov/aqsweb/documents/data_api.html) to collect air quality data for California. The AQS database is maintained by the United States Environmental Protection Agency (EPA) and contains air quality data from thousands of monitoring stations across the United States. The EPA have been storing data for over 50 years, and contains more than 3 billion records now^[https://aqs.epa.gov/aqsweb/documents/about_aqs_data.html].
+
+Our primary research objective is to investigate short-term spatio-temporal trends in air quality in California. For this goal, we collect ozone data, as well as meteorological data such as temperature, humidity, and wind speed. To analyze the trends, we leverage generalized additive models (GAMs) to model the data, due to their flexibility and interpretability.
+
+This project is maintained on [Github](https://github.com/e1444/JSC370_project).
+
+# Data and Preprocessing
+<!-- We acquire data using the following steps:
+
+1. Sign up for an API key using email.
+2. Get a list of parameter classes. We choose the parameter class from this list: in this case `CRITERIA`, which includes common air pollutants.
+3. Get a list of parameters for the `CRITERIA` class.
+4. Get the data for the parameters in the `CRITERIA` class for California in 2024. Due to limits on the API, we can only access one month at a time. The total size of the data is ~2.5 GB, so we save the data to disk as we collect it.
+5. Convert to NDJSON format for easier reading.
+6. Read the data into R and combine into a single data table. -->
+
+We acquire the raw data through the AQS AirData API through their API endpoints. More specific details on the API and our methods of data collection can be found in our Github repository. We acquire data on criteria pollutants and meteorological data in the state of California for the year 2024. Specifically, we collect data on the following pollutants:
+
+- Lead (TSP) Local
+- Carbon monoxide
+- Sulfur dioxide
+- Nitrogen dioxide (N02)
+- Ozone
+
+And the following meteorological data:
+
+- Outdoor temperature
+- Relative humidity
+- Wind speed
+- Wind direction
+- Solar radiation
+
+```{r get parameter classes, eval=FALSE, include=FALSE}
+url <- "https://aqs.epa.gov/data/api/list/classes"
+response <- httr::GET(
+    url,
+    query = list(
+        email = AQS_EMAIL,
+        key = AQS_KEY
+    )
+)
+
+httr::content(response, as = "parsed")
+```
+
+```{r get parameters criteria, eval=FALSE, include=FALSE}
+url <- "https://aqs.epa.gov/data/api/list/parametersByClass"
+response <- httr::GET(
+    url,
+    query = list(
+        email = AQS_EMAIL,
+        key = AQS_KEY,
+        pc = "CRITERIA"
+    )
+)
+
+params_criteria <- map_dfr(httr::content(response, as = "parsed")$Data, as_tibble)
+params_criteria
+```
+
+```{r get parameters met, eval=FALSE, include=FALSE}
+url <- "https://aqs.epa.gov/data/api/list/parametersByClass"
+response <- httr::GET(
+    url,
+    query = list(
+        email = AQS_EMAIL,
+        key = AQS_KEY,
+        pc = "MET"
+    )
+)
+
+params_met <- map_dfr(httr::content(response, as = "parsed")$Data, as_tibble)
+params_met
+```
+
+```{r params, eval=FALSE, include=FALSE}
+params_met_final <- c(
+    62101, # Outdoor temperature
+    62201, # Relative humidity
+    61101, # Wind speed
+    61102, # Wind direction
+    63301  # Solar radiation
+)
+```
+
+```{r get data, eval=FALSE, include=FALSE}
+url <- "https://aqs.epa.gov/data/api/sampleData/byState"
+
+# Can only fetch 5 parameters per query
+# Can only fetch 1million observations per query
+# Each parameter will return as a separate observation, so specifying many parameters will quickly exceed this limit
+# Thus, we will fetch one month at a time for criteria, and one day at a time for met
+
+for (month in 1:12) {
+    start_date <- as.Date(sprintf("%d-%02d-01", year, month))  # First day of the month
+    end_date <- ceiling_date(start_date, "month") - days(1)  # Last day of the month
+
+    start_formatted <- format(start_date, "%Y%m%d")  # Convert to YYYYMMDD
+    end_formatted <- format(end_date, "%Y%m%d")
+
+    file_path <- paste("data/criteria/", year, month, ".json", sep = "")
+    print(file_path)
+    if (!file.exists(file_path)) {
+        response <- httr::GET(
+            url,
+            query = list(
+                email = AQS_EMAIL,
+                key = AQS_KEY,
+                param = paste(params_criteria$code[1:5], collapse = ","),
+                bdate = start_formatted,
+                edate = end_formatted,
+                state = STATE
+            ),
+            httr::write_disk(file_path, overwrite = TRUE)
+        )
+    }
+}
+
+for (day in 0:364) {
+    start_date <- as.Date(sprintf("%d-01-01", year)) + day
+    end_date <- start_date + 1
+
+    start_formatted <- format(start_date, "%Y%m%d")  # Convert to YYYYMMDD
+    end_formatted <- format(end_date, "%Y%m%d")
+
+    file_path <- paste("data/met/", start_formatted, ".json", sep = "")
+    print(file_path)
+    if (!file.exists(file_path)) {
+        response <- httr::GET(
+            url,
+            query = list(
+                email = AQS_EMAIL,
+                key = AQS_KEY,
+                param = paste(params_met_final, collapse = ","),
+                bdate = start_formatted,
+                edate = end_formatted,
+                state = STATE
+            ),
+            httr::write_disk(file_path, overwrite = TRUE)
+        )
+    }
+}
+
+```
+
+```{bash convert to ndjson, eval=FALSE, include=FALSE}
+for file in data/criteria/*.json; do
+    jq -c '.Data[]' "$file" > "${file%.json}.ndjson"
+done
+
+rm data/criteria/*.json
+
+for file in data/met/*.json; do
+    jq -c '.Data[]' "$file" > "${file%.json}.ndjson"
+done
+
+rm data/met/*.json
+```
+
+```{r read data criteria, include=FALSE}
+all_data <- list()
+
+for (month in 1:12) {
+    file_path <- paste("data/criteria/", year, month, ".ndjson", sep = "")
+    con <- file(file_path, "r")
+    data <- stream_in(con, pagesize = 1000)
+    close(con)
+
+    if (!is.null(data)) {
+        dt <- as.data.table(data)
+        all_data[[length(all_data) + 1]] <- dt  # Append to list
+    }
+}
+
+dt <- rbindlist(all_data)
+```
+
+```{r read data met, include=FALSE}
+all_data <- list()
+
+for (day in 0:364) {
+    start_date <- as.Date(sprintf("%d-01-01", year)) + day
+    start_formatted <- format(start_date, "%Y%m%d") 
+    file_path <- paste("data/met/", start_formatted, ".ndjson", sep = "")
+
+    con <- file(file_path, "r")
+    data <- stream_in(file(file_path, "r"), pagesize = 1000)
+    close(con)
+
+    if (!is.null(data)) {
+        dt_met <- as.data.table(data)
+        all_data[[length(all_data) + 1]] <- dt_met  # Append to list
+    }
+}
+
+dt_met <- rbindlist(all_data)
+```
+
+## Cleaning
+```{r dims, eval=FALSE, include=FALSE}
+dim(dt)
+```
+
+Our data contains the following columns (with descriptions from the [AQS Data dictionary](https://aqs.epa.gov/aqsweb/documents/AQS_Data_Dictionary.html)):
+
+```{r variables, message=TRUE}
+colnames_human <- c(
+        "State code",
+        "County code",
+        "Site number",
+        "Parameter code",
+        "Parameter occurrence code",
+        "Latitude",
+        "Longitude",
+        "Geodetic datum",
+        "Parameter",
+        "Local date",
+        "Local time",
+        "GMT date",
+        "GMT time",
+        "Sample measurement",
+        "Units of measure",
+        "Units of measure code",
+        "Sample duration",
+        "Sample duration code",
+        "Sample frequency",
+        "Detection limit",
+        "Uncertainty",
+        "Qualifier",
+        "Method type",
+        "Method",
+        "Method code",
+        "State name",
+        "County name",
+        "Last updated",
+        "CBSA code"
+    )
+
+desc <- data.frame(
+    variable = colnames_human,
+    type = sapply(dt, class),
+    description = c(
+        "FIPS code for the state",
+        "FIPS code for the county",
+        "Unique identifier for the site",
+        "Unique identifier for the parameter",
+        "Parameter Occurrence Code, which is a unique identifier for the parameter occurrence",
+        "Latitude",
+        "Longitude",
+        "Geodetic datum",
+        "Parameter name",
+        "Local date when the measurement was taken",
+        "Local time when the measurement was taken",
+        "The UTC date when the measurement was taken",
+        "The UTC time when the measurement was taken",
+        "The measured value",
+        "The unit of measure for the parameter",
+        "Unique identifier for the unit of measure",
+        "The time duration over which the measurement was taken",
+        "Unique identifier for the time duration",
+        "The frequency of the measurement",
+        "The minimum concentration of the measurement in which the value is considered valid",
+        "Estimated uncertainty of the measurement",
+        "A flag indicating if the measurement has been adjusted, voided, or requires special consideration",
+        "The category of method used",
+        "The specific method used",
+        "Unique identifier for the method",
+        "The name of the state",
+        "The name of the county",
+        "The last date the record was updated in the AQS database",
+        "The Core Based Statistical Area (CBSA) code"
+    )
+)
+
+colnames(desc) <- c("Variable", "Type", "Description")
+
+knitr::kable(desc, format = "latex", row.names = FALSE, caption = "Table 1: AQS response column names, types, and descriptions.") %>%
+    kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+    row_spec(0, bold = TRUE)
+```
+
+In the pollutant and meteorological data, parameter corresponds to which criteria pollutant and meteorological parameter the observation is measuring, respectively.
+
+### Pollutants data
+The missingness in the pollutant data is shown in the following table:
+
+```{r summary stats, message=TRUE}
+summary_dt <- data.table(
+  variable = colnames_human,
+  unique_values = sapply(dt, function(x) length(unique(na.omit(x)))),
+  missing_values = sapply(dt, function(x) sum(is.na(x)))
+)
+
+colnames(summary_dt) <- c("Variable", "Unique Values", "Missing Values")
+
+knitr::kable(summary_dt, format = "latex", caption = "Table 2: Variable value count and missingness in pollutant data. Mostly clean, but some variables such as qualifier and sample measurement require attention.") %>%
+    kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+    row_spec(0, bold = TRUE)
+```
+
+As sample measurement is our primary variable of interest, we remove observations with missing values in this column. Additionally, we remove observations with problematic qualifiers (as described in the [AQS Qualifiers list](https://aqs.epa.gov/aqsweb/documents/codetables/qualifiers.html)).
+
+```{r clean data, include=FALSE}
+dt_clean <- dt[!is.na(sample_measurement)]
+dt_clean <- dt_clean[is.na(qualifier) | qualifier %in% c("1C", "1V", "V")]
+```
+
+Amongst the variables, there exists redundancy, such as between codes and names (e.g. "Parameter code" and "Paramete"). In addition, the state is California in all our data, so it is redundant. We select only the following columns:
+
+<!-- - `site_number`
+- `latitude`
+- `longitude`
+- `parameter`
+- `date_gmt`
+- `time_gmt`
+- `sample_measurement`
+- `units_of_measure`
+- `sample_duration`
+- `sample_frequency`
+- `detection_limit`
+- `method`
+- `county` -->
+
+- Site number
+- Latitude
+- Longitude
+- Parameter
+- GMT Date
+- GMT Time
+- Sample measurement
+- Units of measure
+- Sample duration
+- Sample frequency
+- Detection limit
+- Method
+- County
+
+We convert the date and time columns to a single datetime column.
+
+```{r select columns, include=FALSE}
+dt_clean <- dt_clean[, c("site_number", "latitude", "longitude", "parameter", "date_gmt", "time_gmt", "sample_measurement", "units_of_measure", "sample_duration", "sample_frequency", "detection_limit", "method", "county")]
+dt_clean[, datetime_gmt := ymd_hm(paste(date_gmt, time_gmt), tz = "GMT")]
+dt_clean[, c("date_gmt", "time_gmt") := NULL]
+
+dim(dt_clean)
+```
+
+With our cleaned data, we can now perform some summary statistics to investigate the data. We first check the distribution of sample measurements, and then check for any other issues.
+
+```{r summary stats cleaned, message=TRUE}
+summary_stats <- dt_clean[, lapply(.SD, function(x) {
+  if (is.numeric(x)) {
+    list(
+      mean = mean(x, na.rm = TRUE),
+      median = median(x, na.rm = TRUE),
+      sd = sd(x, na.rm = TRUE),
+      min = min(x, na.rm = TRUE),
+      max = max(x, na.rm = TRUE),
+      unique = length(unique(na.omit(x))),
+      na_count = sum(is.na(x))
+    )
+  } else {
+    NULL
+  }
+}), .SDcols = names(dt_clean)]
+
+summary_stats_df <- as.data.frame(t(summary_stats))
+colnames(summary_stats_df) <- c("Mean", "Median", "SD", "Min", "Max", "Unique Values", "NA Count")
+rownames(summary_stats_df) <- c("Latitude", "Longitude", "Sample measurement", "Detection limit")
+
+knitr::kable(summary_stats_df, format = "latex", caption = "Table 3: Summary statistics of numeric columns in pollutant data. Negative values in sample measurement are unexpected, but the remaining information is consistent.") %>%
+    kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+    row_spec(0, bold = TRUE)
+```
+
+We can note a few important observations:
+
+- The longitude and latitude values are consistent with California.
+- Some sample measurements are negative, which is not possible. This could possibly be caused by instrumental bias or other issues. As these observations are a small fraction of the data (n = 13), we remove them.
+
+```{r remove negative measurements, include=FALSE}
+dt_clean <- dt_clean[sample_measurement >= 0]
+```
+
+Finally, we verify that units are consistent within each parameter.
+
+```{r check units, message=TRUE}
+units_check <- dt_clean[, .(unique_units = unique(units_of_measure)), by = parameter]
+
+colnames(units_check) <- c("Parameter", "Unique Units")
+
+knitr::kable(units_check, format = "latex", caption = "Table 4: Unique units for each pollutant. There is only one unit per pollutant.") %>%
+    kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+    row_spec(0, bold = TRUE)
+```
+
+We can see that units are consistent within each parameter. As this is the case, we can rename the parameter name to include the unit, and drop the unit. We also drop the detection limit, as it is not relevant to our analysis.
+
+```{r rename parameter, include=FALSE}
+dt_clean[, c("units_of_measure", "detection_limit") := NULL]
+```
+
+```{r most observations, include=FALSE}
+most_obs_param <- dt_clean[, .N, by = parameter][order(-N)][1]
+most_obs_param
+```
+
+To prepare our data for analysis, we choose only one parameter to measure. In our case, we focus on the parameter with the most observations, which is ozone.
+
+```{r ozone, include=FALSE}
+dt_ozone <- dt_clean[parameter == "Ozone"]
+head(dt_ozone)
+```
+
+We can observe that the sample duration and sample frequency are uniform across all observations, being 1 hour and hourly respectively. Since we chose ozone to be the only parameter, that column is uniform as well. Thus, we drop these columns.
+
+```{r drop columns, include=FALSE}
+dt_ozone[, c("sample_duration", "sample_frequency", "parameter") := NULL]
+```
+
+Finally, we note that although California has 57 counties, our data only contains 47. This is due to the fact that some counties do not have monitoring stations.
+
+Our final data table contains 968503 observations and 8 variables:
+
+<!-- - `site_number`
+- `latitude`
+- `longitude`
+- `sample_measurement` (ozone, measured in PPM)
+- `method`
+- `county`
+- `datetime_gmt` -->
+
+- Site number
+- Latitude
+- Longitude
+- Sample measurement (ozone, measured in PPM)
+- Method
+- County
+- Datetime (GMT)
+
+### Meteorological data
+We follow similar steps to clean the meteorological data. We begin by removing missingness and problematic values in the same way as before, and filtering for relevant columns.
+
+```{r met dims, eval=FALSE, include=FALSE}
+dim(dt_met)
+```
+
+```{r met clean missing, include=FALSE}
+dt_met_clean <- dt_met[!is.na(sample_measurement)]
+dt_met_clean <- dt_met_clean[is.na(qualifier) | qualifier %in% c("1C", "1V", "V")]
+dt_met_clean <- dt_met_clean[sample_measurement >= 0]
+dt_met_clean <- dt_met_clean[, c("site_number", "latitude", "longitude", "parameter", "date_gmt", "time_gmt", "sample_measurement", "units_of_measure", "sample_duration", "sample_frequency", "method", "county")]
+dt_met_clean[, datetime_gmt := ymd_hm(paste(date_gmt, time_gmt), tz="GMT")]
+dt_met_clean[, c("date_gmt", "time_gmt") := NULL]
+dim(dt_met_clean)
+```
+
+```{r met check params, include=FALSE}
+dt_temp <- dt_met_clean[parameter == "Outdoor Temperature"]
+print(unique(dt_temp$units_of_measure))
+print(unique(dt_temp$sample_duration))
+print(unique(dt_temp$sample_frequency))
+
+dt_humidity <- dt_met_clean[parameter == "Relative Humidity "]
+print(unique(dt_humidity$units_of_measure))
+print(unique(dt_humidity$sample_duration))
+print(unique(dt_humidity$sample_frequency))
+
+dt_wind_speed <- dt_met_clean[parameter == "Wind Speed - Scalar"]
+print(unique(dt_wind_speed$units_of_measure))
+print(unique(dt_wind_speed$sample_duration))
+print(unique(dt_wind_speed$sample_frequency))
+
+dt_wind_dir <- dt_met_clean[parameter == "Wind Direction - Scalar"]
+print(unique(dt_wind_dir$units_of_measure))
+print(unique(dt_wind_dir$sample_duration))
+print(unique(dt_wind_dir$sample_frequency))
+
+dt_solar <- dt_met_clean[parameter == "Solar radiation"]
+print(unique(dt_solar$units_of_measure))
+print(unique(dt_solar$sample_duration))
+print(unique(dt_solar$sample_frequency))
+```
+
+We similarly verify the consistency of units within each parameter.
+
+```{r met check units, message=TRUE}
+units_check <- dt_met_clean[, .(unique_units = unique(units_of_measure)), by = parameter]
+colnames(units_check) <- c("Parameter", "Unique Units")
+
+knitr::kable(units_check, format = "latex", caption = "Table 5: Unique units for meteorological data. There is only one unit per parameter.") %>%
+    kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+    row_spec(0, bold = TRUE)
+```
+
+In this case, we want to keep all of the parameters, as they are all relevant to our analysis. Thus we flatten the parameters column, so that each parameter is a separate column. Importantly, we can note that the the observations are not unique. We choose to use a mean aggregation for our data.
+
+```{r met flatten, include=FALSE}
+dt_met_flat <- dt_met_clean[sample_frequency == "HOURLY"]
+dt_met_flat <- dt_met_flat[sample_duration == "1 HOUR"]
+dt_met_flat <- dt_met_flat[, -c("sample_duration", "sample_frequency", "units_of_measure", "method")]
+dt_met_flat <- dcast(dt_met_flat, datetime_gmt + site_number + latitude + longitude + county ~ parameter, value.var = "sample_measurement", fun.aggregate = mean)
+dim(dt_met_flat)
+```
+
+Since we have flatted our data, is is important that we once again check for missingness in our data.
+
+```{r met missingness, include=FALSE}
+summary_dt <- data.table(
+  variable = names(dt_met_flat),
+  unique_values = sapply(dt_met_flat, function(x) length(unique(na.omit(x)))),
+  missing_values = sapply(dt_met_flat, function(x) sum(is.na(x)))
+)
+
+colnames(summary_dt) <- c("Variable", "Unique Values", "Missing Values")
+
+knitr::kable(summary_dt, format = "latex") %>%
+    kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+    row_spec(0, bold = TRUE)
+```
+
+We can observe that there is high missingness (>50%) in solar radiation, and wind direction. For our analysis, we drop these columns to give us more robust data.
+
+```{r met drop columns, include=FALSE}
+dt_met_flat[, c("Solar radiation", "Wind Direction - Scalar") := NULL]
+```
+
+```{r clean met flat, include=FALSE}
+dt_met_flat <- dt_met_flat[!is.na(`Outdoor Temperature`)]
+dt_met_flat <- dt_met_flat[!is.na(`Wind Speed - Scalar`)]
+dt_met_flat <- dt_met_flat[!is.na(`Relative Humidity `)]
+setnames(dt_met_flat, old = "Outdoor Temperature", new = "outdoor_temperature")
+setnames(dt_met_flat, old = "Relative Humidity ", new = "relative_humidity")
+setnames(dt_met_flat, old = "Wind Speed - Scalar", new = "wind_speed")
+dim(dt_met_flat)
+```
+
+We are left with a table with 569022 observations and 8 variables:
+
+<!-- - `site_number`
+- `latitude`
+- `longitude`
+- `county`
+- `datetime_gmt`
+- `outdoor_temperature` (F)
+- `wind_speed` (knots)
+- `relative_humidity` (% RH) -->
+
+- Site number
+- Latitude
+- Longitude
+- County
+- Datetime (GMT)
+- Outdoor temperature (F)
+- Wind speed (knots)
+- Relative humidity (% RH)
+
+## Merging
+We finish by merging the two data tables together on datetime and site number. We use an inner join to only keep observations that are present in both data tables.
+
+```{r merge, include=FALSE}
+dt_merged <- merge(dt_ozone, dt_met_flat, by = c("datetime_gmt", "site_number", "latitude", "longitude", "county"), all = FALSE)
+dim(dt_merged)
+```
+
+We are left with a table with 381591 observations and 10 variables:
+
+<!-- - `datetime_dmt`
+- `site_number`
+- `latitude`
+- `longitude`
+- `county`
+- `sample_measurement`
+- `method`
+- `outdoor_temperature`
+- `relative_humidity`
+- `wind_speed` -->
+
+- Site number
+- Datetime (GMT)
+- Latitude
+- Longitude
+- County
+- Sample measurement (ozone, measured in PPM)
+- Method
+- Outdoor temperature (F)
+- Relative humidity (% RH)
+- Wind speed (knots)
+
+This is the dataset that we use for our analysis. This dataset is provided in the `data/` directory of our repository.
+
+In the modelling section, we make several small modifications to the data to prepare it for modelling. These steps be detailed in the modelling section, but are not necessary for EDA.
+
+```{r export, eval=FALSE, include=FALSE}
+fwrite(dt_merged, "data/cleaned.csv", row.names = FALSE)
+```
+
+```{r import, eval=FALSE, include=FALSE}
+dt_merged <- fread("data/cleaned.csv")
+```
+
+
+# Methods
+<!-- Afterwards, we can clean the data and perform some preliminary analysis. We will use primarily use summary statistics and plots to investigate the data. We will address missingness and other problems as they arise. We will finally select only columns of interest to our analysis. -->
+<!-- 
+Afterwards, we clean the data and perform exploratory data analysis, consisting of creating summary statistics and plots to investigate the structure of the data. We will address missingness and other problems as they arise. We will finally select only columns of interest to our analysis. We will only focus on one pollutant in this analysis for simplicity, but the same methods can be applied to other pollutants.
+
+Finally, we will attempt to perform prediction of the sample measurement using other variables. We will use various models, including linear regression, random forest, and gradient boosting. We will evaluate the models using cross-validation and other metrics, and select the best model for our data. -->
+
+In this section, we describe the process took to reach our eventual models. We begin by performing exploratory data analysis (EDA) to investigate the data. This consists largely of making plots to give us a better understanding of the data, and hopefully guide modelling decisions down the line. We will be particularly interested in the distribution of sample measurements, and how they vary over time and space. We will also be interested in how the sample measurements relate to other variables, such as temperature, humidity, and wind speed.
+
+We then attempt to model the data using generalized additive models (GAMs). While modern machine learning method such as random forests and its variants are powerful, they lack the interpretability of GAMs. For our purposes, analysing trends in the data, GAMs provide a good balance between interpretability and performance.
+
+We pick the distribution and link function based on what we observe in the data. We fit several models with varying complexity, and evaluate their performance using cross-validation. Afterwards, we select the best model based on performance and interpretability. By utilizing diagnostic plots, we can assess the trends in the data, and how well the models fit the data.
+
+# Results
+## Exploratory Plots
+First, we can plot the distribution of sample measurements for ozone.
+
+```{r plot distributions, message=TRUE}
+p <- ggplot(dt_merged, aes(x = sample_measurement)) +
+    geom_histogram(bins = 70) +
+    labs(title = "Distribution of Ozone measurements", x = "Sample Measurement", y = "Frequency", caption = "Figure 1: Distribution of ozone measurements. The distribution is right-skewed, with a large number of zero values.")
+
+p
+```
+
+We can observe that the distributions of every parameter is right-skewed. This is expected, as air quality is generally good, and high values are rare. We can also observe evidence of zero-inflation, as there are more observations at 0 than we might expect from the distribution. This is likely due to the minimum detection limit of the instruments. Below a certain threshold non-zero values are reported as zero. For our purposes, we will ignore this issue, as it does not significantly affect our analysis.
+
+As the data is non-negative and numerical, we may expect a gamma distribution to be a good fit. We also try fitting a normal and skew-normal distribution to the data.
+
+```{r distribution fit, message=TRUE}
+dt2 <- dt_merged[sample_measurement > 0]
+fit_gam <- fitdistr(dt2$sample_measurement, "gamma")
+
+shape <- fit_gam$estimate[1]
+rate <- fit_gam$estimate[2]
+
+x <- seq(0, max(dt_merged$sample_measurement), length = 100)
+y <- dgamma(x, shape = shape, rate = rate)
+gam_fitted_data <- data.frame(x = x, y = y)
+
+fit_sn <- selm(sample_measurement ~ 1,
+    data = dt_merged,
+    family = "SN"
+)
+
+params <- coef(fit_sn, "DP")  # DP = direct parameterization
+xi <- params["xi"]            # location
+omega <- params["omega"]      # scale
+alpha <- params["alpha"]      # shape (skewness)
+
+x_vals <- seq(min(dt2$sample_measurement), max(dt2$sample_measurement), length.out = 500)
+sn_density <- dsn(x_vals, xi = xi, omega = omega, alpha = alpha)
+sn_fitted_data <- data.frame(x = x_vals, y = sn_density)
+
+fit_norm <- fitdistr(dt2$sample_measurement, "normal")
+mu <- fit_norm$estimate[1]
+sigma <- fit_norm$estimate[2]
+x <- seq(min(dt2$sample_measurement), max(dt2$sample_measurement), length.out = 100)
+y <- dnorm(x, mean = mu, sd = sigma)
+norm_fitted_data <- data.frame(x = x, y = y)
+
+sn_fitted_data$line_type <- "Skew Normal Fit"
+gam_fitted_data$line_type <- "GAM Fit"
+norm_fitted_data$line_type <- "Normal Fit"
+line_data <- rbind(sn_fitted_data, gam_fitted_data, norm_fitted_data)
+
+p <- ggplot(dt_merged, aes(x = sample_measurement)) +
+    geom_histogram(aes(y =after_stat(density)), bins = 70) +
+    geom_line(data = line_data, aes(x = x, y = y, color = line_type), size = 1) +
+    labs(title = "Distribution of Ozone Measurements", x = "Sample Measurement", y = "Density")
+
+p
+```
+
+We can observe from the distributions, the normal distribution is a better fit to the data. Since it also happens to be a common distribution, we choose to use it for our models.
+
+Next, we plot the parameters over time.
+
+```{r plot time series ozone, message=TRUE}
+p1 <- ggplot(dt_merged, aes(x = datetime_gmt, y = sample_measurement)) +
+    geom_point(alpha = 0.01) +
+    labs(title = "Sample Measurements Over Time", x = "Date", y = "Sample Measurement")
+
+p2 <- ggplot(dt_merged, aes(x = datetime_gmt, y = outdoor_temperature)) +
+    geom_point(alpha = 0.01) +
+    labs(title = "Outdoor Temperature Over Time", x = "Date", y = "Outdoor Temperature (C)")
+
+p3 <- ggplot(dt_merged, aes(x = datetime_gmt, y = relative_humidity)) +
+    geom_point(alpha = 0.01) +
+    labs(title = "Relative Humidity Over Time", x = "Date", y = "Relative Humidity (%)")
+
+p4 <- ggplot(dt_merged, aes(x = datetime_gmt, y = wind_speed)) +
+    geom_point(alpha = 0.01) +
+    labs(title = "Wind Speed Over Time", x = "Date", y = "Wind Speed (knots)")
+
+p <- p1 + p2 + p3 + p4 +
+    plot_layout(ncol = 2) +
+    plot_annotation(title = "Sample Measurements and Meteorological Data Over Time", caption = "Figure 2: Sample measurements and meteorological data over time. The data is collected hourly, and shows seasonal trends. Ozone levels are higher in the summer months, and lower in the winter months. Temperature follows the same trend, while relative humidity appears to follow the opposite trend. Wind speed appears to be more random.")
+
+p
+```
+
+This gives us a good overview of the data. We now have some evidence that these meteorological parameters are related to ozone levels.h
+
+We can note that although we have location data, since the data is collected from only a few sites (n = 45), it is not possible to effectively visualize the data on a map. Thus, we plot the distribution of sample measurements of ozone by county. We only plot the top 8 counties by observation count here (an interactive version containing all counties is available on the [project website](todo)).
+
+```{r plot ozone by county, message=TRUE}
+top_counties <- dt_merged[, .N, by = county][order(-N)][1:8]$county
+dt_top_counties <- dt_merged[county %in% top_counties]
+
+p <- ggplot(dt_top_counties, aes(x = sample_measurement)) +
+    geom_histogram(bins = 25) +
+    facet_wrap(~county, scales = "free") +
+    labs(title = "Distribution of Ozone Sample Measurements by County", x = "Sample Measurement (ppm)", y = "Frequency", caption = "Figure 3: Distribution of ozone sample measurements by county. The distributions are similar, but there are some differences in the shape and spread of the distributions. This suggests that there may be differences in ozone levels between counties, which is expected due to local factors such as traffic and industry.")
+
+p
+```
+
+This suggests that location is a possible confounder in our analysis, and we should include it in our models.
+
+## Modelling
+
+We will fit our GAMs using the `mgcv` package. We will use the `bam` function, which is a faster version of `gam` for large datasets. We will fit three nested models:
+
+1. A simple model with smooth terms for longitude and latitude, a smooth a term for time, and a smooth term for outdoor temperature, relative humidity, and wind speed.
+2. A more complex model with a tensor product smooth term for outdoor temperature, relative humidity, and wind speed.
+3. A more complex model with a tensor product smooth term for longitude, latitude, and time, and a tensor product smooth term for outdoor temperature, relative humidity, and wind speed.
+
+We will also include cyclic smooth terms for hour, day of week, and day of year. We use the `fREML` method for fitting the models, as it is faster and more efficient for larger datasets. We will also use a discrete approximation to the smooth terms, for the same reason.
+
+
+```{r ml imports, include=FALSE}
+library(mgcv)
+```
+
+```{r gam data, include=FALSE}
+dt_gam <- dt_merged[, .(datetime_gmt, longitude, latitude, sample_measurement, outdoor_temperature, relative_humidity, wind_speed)]
+dt_gam[, hour := hour(datetime_gmt)]
+dt_gam[, dow := wday(datetime_gmt)]
+dt_gam[, doy := yday(datetime_gmt)]
+dt_gam[, time_num := as.numeric(difftime(datetime_gmt, min(datetime_gmt), units = "hours"))]
+```
+
+```{r gam1, include=FALSE}
+gam1 <- bam(sample_measurement ~
+    s(longitude, latitude) +
+    s(hour, bs = "cc", k = 24) +
+    s(dow, bs = "cc", k = 7) +
+    s(time_num, bs = "cc", k = 365) +
+    s(time_num, bs = "cs", k = 100) +
+    s(outdoor_temperature) +
+    s(relative_humidity) +
+    s(wind_speed),
+    data = dt_gam,
+    method = "fREML",
+    discrete = TRUE
+)
+
+summary(gam1)
+```
+
+```{r gam1 summary, message=TRUE}
+tidy_gam1 <- broom.mixed::tidy(gam1)
+colnames(tidy_gam1) <- c("Term", "EDF", "Ref. DF", "F statistic", "P-value")
+tidy_gam1$Term <- c(
+    "Longitude, latitude",
+    "Hour (cyclic)",
+    "Day of week (cyclic)",
+    "Day of year (cyclic)",
+    "Time",
+    "Outdoor temperature",
+    "Relative humidity",
+    "Wind speed"
+)
+
+kable(tidy_gam1, format = "latex", digits = 3, caption = "Table 6: Smooth term statistics for GAM 1. Using a sigificance level of 0.05, we find that all the smooth terms are significant.") %>%
+    kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+    row_spec(0, bold = TRUE)
+```
+
+We treat model 1 as our base model. It explains 76.1% (adjusted R-sq = 0.760) of the variance in the data, and has a scale estimate of 7.39e-05.
+
+```{r gam2, include=FALSE}
+gam2 <- bam(sample_measurement ~
+    s(longitude, latitude) +
+    s(hour, bs = "cc", k = 24) +
+    s(dow, bs = "cc", k = 7) +
+    s(time_num, bs = "cc", k = 365) +
+    s(time_num, bs = "cs", k = 100) +
+    te(outdoor_temperature, relative_humidity, wind_speed),
+    data = dt_gam,
+    method = "fREML",
+    discrete = TRUE
+)
+summary(gam2)
+```
+
+```{r gam2 summary, message=TRUE}
+tidy_gam2 <- broom.mixed::tidy(gam2)
+colnames(tidy_gam2) <- c("Term", "EDF", "Ref. DF", "F statistic", "P-value")
+tidy_gam2$Term <- c(
+    "Longitude, latitude",
+    "Hour (cyclic)",
+    "Day of week (cyclic)",
+    "Day of year (cyclic)",
+    "Time",
+    "Outdoor temperature, relative humidity, wind speed"
+)
+kable(tidy_gam2, format = "latex", digits = 3, caption = "Table 7: Smooth term statistics for GAM 2. Using a sigificance level of 0.05, we find that all the smooth terms are significant.") %>%
+    kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+    row_spec(0, bold = TRUE)
+```
+
+Model 2 is more complex, and since we have more parameters, we expect it to perform better. We find that the model explains 76.8% (adjusted R-sq = 0.767) of the variance in the data, and has a scale estimate of 7.17e-05.
+
+```{r gam3, include=FALSE}
+gam_model3 <- bam(
+      sample_measurement ~
+        s(hour, bs = "cc", k = 24) +
+        s(dow, bs = "cc", k = 7) +
+        s(time_num, bs = "cc", k = 365) +
+        te(longitude, latitude, time_num, bs = "cs", k = c(5, 5, 50)) +  # see below
+        te(outdoor_temperature, relative_humidity, wind_speed),
+      data = dt_gam,
+      method = "fREML",
+      discrete = TRUE
+    )
+summary(gam_model3)
+```
+
+```{r gam3 summary, message=TRUE}
+tidy_gam3 <- broom.mixed::tidy(gam_model3)
+colnames(tidy_gam3) <- c("Term", "EDF", "Ref. DF", "F statistic", "P-value")
+tidy_gam3$Term <- c(
+    "Hour (cyclic)",
+    "Day of week (cyclic)",
+    "Day of year (cyclic)",
+    "Longitude, latitude, time",
+    "Outdoor temperature, relative humidity, wind speed"
+)
+
+kable(tidy_gam3, format = "latex", digits = 3, caption = "Table 8: Smooth term statistics for GAM 3. Using a sigificance level of 0.05, we find that all the smooth terms are significant.") %>%
+    kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+    row_spec(0, bold = TRUE)
+```
+
+Model 3 is the most complex, and we find that it explains 80.3% (adjusted R-sq = 0.802) of the variance in the data, and has a scale estimate of 6.10e-05.
+
+To compare the models, we use cross-validation to estimate the out-of-sample performance of each model. We use 10-fold cross-validation, and calculate the root mean squared error (RMSE) for each model.
+
+```{r gam1 cv, include=FALSE}
+folds <- createFolds(dt_gam$sample_measurement, k = 10, list = TRUE)
+
+cv_results <- lapply(folds, function(fold) {
+    train_data <- dt_gam[-fold]
+    test_data <- dt_gam[fold]
+
+    model <- bam(sample_measurement ~
+        s(longitude, latitude) +
+        s(hour, bs = "cc", k = 24) +
+        s(dow, bs = "cc", k = 7) +
+        s(time_num, bs = "cc", k = 365) +
+        s(time_num, bs = "cs", k = 100) +
+        s(outdoor_temperature) +
+        s(relative_humidity) +
+        s(wind_speed),
+        data = train_data,
+        method = "fREML",
+        discrete = TRUE
+    )
+
+    predictions <- predict(model, newdata = test_data)
+    rmse <- sqrt(mean((predictions - test_data$sample_measurement)^2))
+    return(rmse)
+})
+
+mean_rmse_gam1 <- mean(unlist(cv_results))
+mean_rmse_gam1
+```
+
+```{r gam2 cv, include=FALSE}
+folds <- createFolds(dt_gam$sample_measurement, k = 10, list = TRUE)
+cv_results <- lapply(folds, function(fold) {
+    train_data <- dt_gam[-fold]
+    test_data <- dt_gam[fold]
+
+    model <- bam(sample_measurement ~
+        s(longitude, latitude) +
+        s(hour, bs = "cc", k = 24) +
+        s(dow, bs = "cc", k = 7) +
+        s(time_num, bs = "cc", k = 365) +
+        s(time_num, bs = "cs", k = 100) +
+        te(outdoor_temperature, relative_humidity, wind_speed),
+        data = train_data,
+        method = "fREML",
+        discrete = TRUE
+    )
+
+    predictions <- predict(model, newdata = test_data)
+    rmse <- sqrt(mean((predictions - test_data$sample_measurement)^2))
+    return(rmse)
+})
+
+mean_rmse_gam2 <- mean(unlist(cv_results))
+mean_rmse_gam2
+```
+
+```{r gam3 cv, include=FALSE}
+folds <- createFolds(dt_gam$sample_measurement, k = 10, list = TRUE)
+cv_results <- lapply(folds, function(fold) {
+    train_data <- dt_gam[-fold]
+    test_data <- dt_gam[fold]
+
+    model <- bam(
+      sample_measurement ~
+        s(hour, bs = "cc", k = 24) +
+        s(dow, bs = "cc", k = 7) +
+        s(time_num, bs = "cc", k = 365) +
+        te(longitude, latitude, time_num, bs = "cs", k = c(5, 5, 50)) +  # see below
+        te(outdoor_temperature, relative_humidity, wind_speed),
+      data = train_data,
+      method = "fREML",
+      discrete = TRUE
+    )
+
+    predictions <- predict(model, newdata = test_data)
+    rmse <- sqrt(mean((predictions - test_data$sample_measurement)^2))
+    return(rmse)
+})
+mean_rmse_gam3 <- mean(unlist(cv_results))
+mean_rmse_gam3
+```
+
+Computing the CV RMSE for each model, we find that the models achieve 0.0860, 0.0848, and 0.00783 respectively. This suggests that the models are performing similarly. However, the difference is not large enough to justify the complexity of introducing interaction terms. Thus, we choose model 1 as our final model. We can visualize how well our model fits the data using a scatter plot of the predicted values against the actual values.
+
+```{r gam1 pred plot, message=TRUE}
+pred <- predict(gam1, type = "response")
+ggplot(dt_gam, aes(x = pred, y = dt_gam$sample_measurement)) +
+    geom_point(alpha = 0.4) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    labs(x = "Predicted", y = "Observed", title = "Predicted vs Observed", caption = "Figure 4: Predicted vs observed values for GAM 1. The model fits the data well, but there are some outliers. The model is not perfect, but it is a good approximation of the data.")
+```
+
+One advantage of using GAMs is that we can visualize smooth terms independently, to understand the effect of each variable on the response.
+
+```{r gam1 plot, message=TRUE, fig.cap="Figure 5: Smooth terms for GAM 1. The plots show the effect of each variable on the response. The smooth terms are all significant, and show interesting trends in the data."}
+custom_labels <- c(
+    "Longitude, latitude",
+    "Hour (cyclic)",
+    "Day of week (cyclic)",
+    "Day of year (cyclic)",
+    "Time",
+    "Outdoor temperature",
+    "Relative humidity",
+    "Wind speed"
+)
+custom_xlabels <- c(
+    "Longitude",
+    "Hour",
+    "Day of week",
+    "Hour of year",
+    "Hour since Jan 1, 2024",
+    "Outdoor temperature (F)",
+    "Relative humidity (%)",
+    "Wind speed (knots)"
+)
+
+n_terms <- length(custom_labels)
+par(mfrow = c(2, 4), mar = c(3, 3, 2, 1))
+
+vis.gam(gam1, view = c("longitude", "latitude"), plot.type = "contour", too.far = 0.1, 
+        main = "Longitude, latitude", xlab = "Longitude", ylab = "Latitude")
+
+for (i in 2:n_terms) {
+    mgcv::plot.gam(gam1, select = i, main = custom_labels[i], xlab = custom_xlabels[i], ylab = "Predicted ozone (PPM)")
+}
+```
+
+There are several interesting observations we can make from the plots:
+
+- Ozone is highest in the Bay Area, and also high near the border with Nevada.
+- Ozone is highest during the night, and lowest during the day.
+- Ozone is slightly higher on weekdays than weekends
+- The trend for day of year is very noisy, but appears to be highest during spring and summer months.
+- There is no apparent trend for a long-term trend, which maeks sense since we are using a short time period.
+- Ozone is highest at extreme temperatures, either high or low.
+- Ozone follows an opposite trend with relative humidity, being lowest at extreme humidities.
+- Ozone is lowest at low wind speeds, and highest at high wind speeds.
+
